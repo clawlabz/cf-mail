@@ -1,14 +1,47 @@
-# cf-mail Worker 配置模板
+# cf-mail Worker 配置
 # 使用 `python -m cf_mail.setup` 自动配置，或手动填写以下值
 
 name = "email-receiver"
 main = "src/worker.js"
 compatibility_date = "2024-09-01"
 
-[[kv_namespaces]]
-binding = "EMAIL_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+# ─── 存储后端（选择一种） ───
+# STORAGE_BACKEND: "kv" | "supabase" | "upstash" | "custom"
 
 [vars]
 AUTH_KEY = "YOUR_AUTH_KEY"
 EMAIL_DOMAIN = "YOUR_DOMAIN"
+STORAGE_BACKEND = "kv"
+
+# ─── KV 存储（默认） ───
+# 免费 1000 写/天，适合小量注册
+
+[[kv_namespaces]]
+binding = "EMAIL_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# ─── Supabase 存储（推荐） ───
+# 免费额度大，基本无限制
+# 取消注释并填写你的 Supabase 项目信息
+
+# [vars]
+# STORAGE_BACKEND = "supabase"
+# SUPABASE_URL = "https://xxxxx.supabase.co"
+# SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIs..."
+# SUPABASE_TABLE = "cf_mail_store"
+
+# ─── Upstash Redis 存储 ───
+# 免费 10000 命令/天
+
+# [vars]
+# STORAGE_BACKEND = "upstash"
+# UPSTASH_URL = "https://xxxxx.upstash.io"
+# UPSTASH_TOKEN = "xxxxx"
+
+# ─── 自定义 HTTP API 存储 ───
+# 完全自由，需自建服务
+
+# [vars]
+# STORAGE_BACKEND = "custom"
+# CUSTOM_STORAGE_URL = "https://your-api.example.com"
+# CUSTOM_STORAGE_AUTH = "Bearer your-token"
