@@ -1,0 +1,14 @@
+# cf-mail Worker 配置模板
+# 使用 `python -m cf_mail.setup` 自动配置，或手动填写以下值
+
+name = "email-receiver"
+main = "src/worker.js"
+compatibility_date = "2024-09-01"
+
+[[kv_namespaces]]
+binding = "EMAIL_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[vars]
+AUTH_KEY = "YOUR_AUTH_KEY"
+EMAIL_DOMAIN = "YOUR_DOMAIN"
