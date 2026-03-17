@@ -2,7 +2,7 @@
 
 Unlimited free disposable emails with auto verification code extraction.
 
-Built on Cloudflare's free tier — no third-party API keys, no recurring costs.
+Built on Cloudflare Email Routing + Workers. Pluggable storage backends — start free with KV, scale with Supabase/Redis.
 
 ```python
 from cf_mail import CloudflareMail
@@ -26,13 +26,13 @@ Your Script                  Cloudflare (free tier)              Website
     │                              │ ◄──────────────────────────────│
     │                              │                                │
     │                       4. Email Worker receives mail           │
-    │                          extracts code → stores in KV         │
+    │                          extracts code → stores in backend    │
     │                              │                                │
     │  5. mail.wait_for_code() ──► │                                │
     │  6. returns "482913"    ◄──  │                                │
 ```
 
-**Cloudflare Email Routing** catches all mail → **Worker** extracts codes/links → stores in **KV** → your script polls the API.
+**Cloudflare Email Routing** catches all mail → **Worker** extracts codes/links → stores in **your chosen backend** → your script polls the API.
 
 ## What You Need
 
@@ -225,6 +225,70 @@ code = mail.wait_for_code(
 )
 ```
 
+## Storage Backends
+
+The Worker supports 4 pluggable storage backends. Switch by setting `STORAGE_BACKEND` in `wrangler.toml`:
+
+| Backend | Env Var | Free Limit | Best For |
+|---------|---------|------------|----------|
+| **KV** (default) | `STORAGE_BACKEND=kv` | 1,000 writes/day (~300 registrations) | Getting started, low volume |
+| **Supabase** | `STORAGE_BACKEND=supabase` | 500MB DB, unlimited API calls | High volume, recommended |
+| **Upstash Redis** | `STORAGE_BACKEND=upstash` | 10,000 commands/day | If you already use Upstash |
+| **Custom HTTP** | `STORAGE_BACKEND=custom` | Your server's limit | Full control |
+
+### Switching to Supabase (Recommended for High Volume)
+
+1. Create a table in Supabase SQL Editor (run `worker/supabase_schema.sql`):
+
+```sql
+create table if not exists cf_mail_store (
+  key        text primary key,
+  value      text not null,
+  expires_at timestamptz not null default (now() + interval '5 minutes')
+);
+create index if not exists idx_cf_mail_expires on cf_mail_store (expires_at);
+alter table cf_mail_store enable row level security;
+create policy "Allow anon insert" on cf_mail_store for insert to anon with check (true);
+create policy "Allow anon select" on cf_mail_store for select to anon using (true);
+```
+
+2. Update `wrangler.toml`:
+
+```toml
+[vars]
+STORAGE_BACKEND = "supabase"
+SUPABASE_URL = "https://xxxxx.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIs..."
+SUPABASE_TABLE = "cf_mail_store"
+```
+
+3. Deploy: `npx wrangler deploy`
+
+No changes needed in your Python code — the Worker API stays the same.
+
+### Switching to Upstash Redis
+
+```toml
+[vars]
+STORAGE_BACKEND = "upstash"
+UPSTASH_URL = "https://xxxxx.upstash.io"
+UPSTASH_TOKEN = "xxxxx"
+```
+
+### Switching to Custom HTTP API
+
+Your server needs two endpoints:
+
+- `POST /put` — body: `{"key": "code:abc", "value": {...}, "ttl": 300}`
+- `GET /get?key=code:abc` — response: `{"value": {...}}`
+
+```toml
+[vars]
+STORAGE_BACKEND = "custom"
+CUSTOM_STORAGE_URL = "https://your-api.example.com"
+CUSTOM_STORAGE_AUTH = "Bearer your-token"
+```
+
 ## Preserving Existing Email
 
 If your domain already has email (Gmail, QQ Mail, Outlook, etc.), enabling Email Routing will replace the existing MX records. **Your existing email will stop working** unless you add forwarding rules.
@@ -285,16 +349,17 @@ All require `X-Auth-Key` header or `?key=` query param.
 | `GET /raw?email=prefix` | `{"found": true, "subject": "...", "bodyPreview": "...", ...}` |
 | `GET /health` | `{"ok": true, "domain": "...", ...}` |
 
-## Limits (Free Tier)
+## Limits
 
-| Resource | Daily Free Limit | Notes |
-|----------|-----------------|-------|
-| Workers Requests | 100,000 | Polling + email events |
-| KV Reads | 100,000 | Code/link queries |
-| KV Writes | 1,000 | ~300 registrations/day |
-| Email Routing | Unlimited | No cap on incoming emails |
+| Resource | Free Limit | Bottleneck? |
+|----------|-----------|-------------|
+| Email Routing | Unlimited | No |
+| Workers Requests | 100,000/day | No |
+| KV Writes | 1,000/day | **Yes (~300 reg/day)** |
+| Supabase DB | 500MB, unlimited API | No |
+| Upstash Redis | 10,000 cmds/day | ~3,000 reg/day |
 
-Need more? Workers Paid plan ($5/month) removes KV limits.
+**KV is the only backend with a tight limit.** Switch to Supabase for effectively unlimited free registrations.
 
 ## License
 
