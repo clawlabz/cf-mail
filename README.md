@@ -1,47 +1,150 @@
 # cf-mail
 
-Zero-cost disposable email service powered by **Cloudflare Email Routing + Workers + KV**.
+Unlimited free disposable emails with auto verification code extraction.
 
-Generate unlimited email addresses on your domain, automatically receive and extract verification codes/links — perfect for batch registration, automated testing, and CI/CD pipelines.
+Built on Cloudflare's free tier — no third-party API keys, no recurring costs.
 
-## Features
+```python
+from cf_mail import CloudflareMail
 
-- **Zero cost** — Uses Cloudflare free tier (100K Workers requests/day, 1K KV writes/day)
-- **No third-party API** — Only needs a domain + Cloudflare account
-- **Unlimited addresses** — `random@yourdomain.com`, no mailbox creation needed
-- **Auto-extract** — Verification codes (4-8 digits) and verification links
-- **Raw email access** — Full email content for custom parsing
-- **Thread-safe** — Built for concurrent batch operations
-- **One-click setup** — Auto-configure Cloudflare via API
+mail = CloudflareMail(domain="yourdomain.com", api_url="https://...", auth_key="...")
 
-## Quick Start
+email, token = mail.create_email()       # → r7kx2mf@yourdomain.com
+code = mail.wait_for_code(token)          # → "482913"
+```
 
-### 1. Install
+## How It Works
+
+```
+Your Script                  Cloudflare (free tier)              Website
+    │                              │                                │
+    │  1. mail.create_email()      │                                │
+    │     → random@yourdomain.com  │                                │
+    │                              │                                │
+    │  2. Register with email  ──────────────────────────────────►  │
+    │                              │   3. Website sends OTP email   │
+    │                              │ ◄──────────────────────────────│
+    │                              │                                │
+    │                       4. Email Worker receives mail           │
+    │                          extracts code → stores in KV         │
+    │                              │                                │
+    │  5. mail.wait_for_code() ──► │                                │
+    │  6. returns "482913"    ◄──  │                                │
+```
+
+**Cloudflare Email Routing** catches all mail → **Worker** extracts codes/links → stores in **KV** → your script polls the API.
+
+## What You Need
+
+- A **domain** with DNS on Cloudflare (cheap domains start at ~$1/year)
+- A **Cloudflare account** (free)
+
+That's it. No API keys to buy, no mailbox to maintain.
+
+## Setup
+
+### Option A: Auto Setup (Recommended)
 
 ```bash
 pip install cf-mail
-```
-
-### 2. Setup (Auto)
-
-```bash
 python -m cf_mail.setup
 ```
 
-You'll need:
-- A **domain** with DNS on Cloudflare
-- **Cloudflare API Token** (create at https://dash.cloudflare.com/profile/api-tokens)
-  - Permissions: `Zone:DNS:Edit`, `Zone:Email Routing:Edit`, `Account:Workers Scripts:Edit`, `Account:Workers KV Storage:Edit`
-- **Account ID** and **Zone ID** (found on your domain's overview page in Cloudflare Dashboard)
+The wizard asks for your Cloudflare credentials and configures everything automatically:
 
-The setup wizard will automatically:
-1. Create KV namespace
-2. Configure DNS records (MX + SPF)
-3. Generate auth key
-4. Deploy the Worker
-5. Configure Email Routing catch-all
+1. Creates KV storage namespace
+2. Adds DNS records (MX + SPF)
+3. Generates a secret auth key
+4. Deploys the Worker
+5. Configures email routing
 
-### 3. Use
+**Required Cloudflare API Token permissions:**
+- Zone: DNS Edit, Email Routing Edit
+- Account: Workers Scripts Edit, Workers KV Storage Edit
+
+Create a token at: https://dash.cloudflare.com/profile/api-tokens
+
+You'll also need your **Account ID** and **Zone ID** — both are on your domain's overview page in Cloudflare Dashboard (right sidebar, bottom).
+
+### Option B: Manual Setup
+
+<details>
+<summary>Click to expand step-by-step guide</summary>
+
+#### 1. Create KV Namespace
+
+Cloudflare Dashboard → **Storage & Databases** → **KV** → **Create namespace**
+
+Name it `EMAIL_KV`, note the **Namespace ID**.
+
+#### 2. Add DNS Records
+
+Dashboard → your domain → **DNS** → **Records**:
+
+| Type | Name | Content | Priority |
+|------|------|---------|----------|
+| MX | `@` | `route1.mx.cloudflare.net` | 10 |
+| MX | `@` | `route2.mx.cloudflare.net` | 20 |
+| MX | `@` | `route3.mx.cloudflare.net` | 30 |
+| TXT | `@` | `v=spf1 include:_spf.mx.cloudflare.net ~all` | - |
+
+> **Already using email on this domain?** See [Preserving Existing Email](#preserving-existing-email) below.
+
+#### 3. Generate Auth Key
+
+```bash
+openssl rand -hex 32
+```
+
+#### 4. Deploy Worker
+
+```bash
+cd worker
+npm install
+```
+
+Edit `wrangler.toml`:
+```toml
+[[kv_namespaces]]
+binding = "EMAIL_KV"
+id = "your-namespace-id-here"
+
+[vars]
+AUTH_KEY = "your-generated-key-here"
+EMAIL_DOMAIN = "yourdomain.com"
+```
+
+```bash
+npx wrangler login
+npx wrangler deploy
+```
+
+Note the Worker URL from the output (e.g. `https://email-receiver.xxx.workers.dev`).
+
+#### 5. Enable Email Routing
+
+Dashboard → your domain → **Email** → **Email Routing**:
+
+1. Enable Email Routing
+2. Go to **Routing Rules** tab
+3. Edit **Catch-all** → Action: **Send to a Worker** → select `email-receiver`
+4. Save
+
+#### 6. Test
+
+Send an email containing "654321" to `test@yourdomain.com`, then:
+
+```bash
+curl "https://email-receiver.xxx.workers.dev/code?email=test" \
+  -H "X-Auth-Key: your-key"
+# → {"found":true,"code":"654321",...}
+```
+
+</details>
+
+## Usage
+
+### Get Verification Code
 
 ```python
 from cf_mail import CloudflareMail
@@ -52,155 +155,146 @@ mail = CloudflareMail(
     auth_key="your-secret-key",
 )
 
-# Generate a random email
 email, token = mail.create_email()
-print(f"Email: {email}")  # e.g. a8kx2mf@yourdomain.com
+# → ("a8kx2mf@yourdomain.com", "a8kx2mf")
 
-# ... use this email to register on a website ...
+# ... register on a website with this email ...
 
-# Wait for verification code
 code = mail.wait_for_code(token, timeout=120)
-print(f"Code: {code}")  # e.g. "482913"
+# → "482913"
+```
 
-# Or wait for verification link
+### Get Verification Link
+
+```python
+email, token = mail.create_email()
+# ... register on a website that sends a verification link ...
+
 link = mail.wait_for_link(token, timeout=120)
-print(f"Link: {link}")  # e.g. "https://example.com/verify?token=..."
+# → "https://example.com/verify?token=abc123"
 ```
 
-## Manual Setup
+### Get Raw Email Content
 
-If you prefer to configure manually instead of using the auto-setup:
+```python
+email, token = mail.create_email()
+# ... trigger an email ...
 
-### Step 1: Create KV Namespace
-
-Cloudflare Dashboard → **Storage & Databases** → **KV** → **Create namespace**
-
-Name: `EMAIL_KV`, note the Namespace ID.
-
-### Step 2: DNS Records
-
-Dashboard → Your domain → **DNS** → **Records**, add:
-
-| Type | Name | Content | Priority |
-|------|------|---------|----------|
-| MX | `@` | `route1.mx.cloudflare.net` | 10 |
-| MX | `@` | `route2.mx.cloudflare.net` | 20 |
-| MX | `@` | `route3.mx.cloudflare.net` | 30 |
-| TXT | `@` | `v=spf1 include:_spf.mx.cloudflare.net ~all` | - |
-
-> ⚠️ **Warning**: This replaces existing MX records. If you have existing email (e.g., Google Workspace, QQ Mail), see [Preserving Existing Email](#preserving-existing-email).
-
-### Step 3: Generate Auth Key
-
-```bash
-openssl rand -hex 32
+result = mail.wait_for_email(token, timeout=60)
+if result.found:
+    print(result.subject)       # Email subject
+    print(result.from_addr)     # Sender
+    print(result.body_preview)  # First 4000 chars of raw email
 ```
 
-### Step 4: Deploy Worker
+### Custom Email Prefix
 
-```bash
-cd worker
-npm install
-
-# Edit wrangler.toml with your KV ID, auth key, and domain
-npx wrangler login
-npx wrangler deploy
+```python
+email, token = mail.create_email(prefix="john-doe-123")
+# → ("john-doe-123@yourdomain.com", "john-doe-123")
 ```
 
-### Step 5: Configure Email Routing
+### Batch Registration (Multi-threaded)
 
-Dashboard → Your domain → **Email** → **Email Routing**:
+```python
+import concurrent.futures
+from cf_mail import CloudflareMail
 
-1. Enable Email Routing
-2. **Routing Rules** → **Catch-all** → Edit
-3. Action: **Send to a Worker** → Select `email-receiver`
-4. Save
+mail = CloudflareMail(domain="yourdomain.com", api_url="...", auth_key="...")
 
-### Step 6: Test
+def register_one(i):
+    email, token = mail.create_email()
+    # ... register logic ...
+    code = mail.wait_for_code(token, timeout=120)
+    return code is not None
 
-```bash
-# Send a test email to test@yourdomain.com with "123456" in the body
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+    results = list(pool.map(register_one, range(100)))
 
-# Query the Worker
-curl "https://email-receiver.xxx.workers.dev/code?email=test" \
-  -H "X-Auth-Key: your-auth-key"
+print(f"Success: {sum(results)}/{len(results)}")
+```
 
-# Expected: {"found":true,"code":"123456",...}
+### Progress Callback
+
+```python
+code = mail.wait_for_code(
+    token,
+    timeout=120,
+    poll_interval=3,
+    on_poll=lambda elapsed, total: print(f"Waiting... {elapsed}s/{total}s"),
+)
 ```
 
 ## Preserving Existing Email
 
-If your domain already has email service (Gmail, QQ Mail, etc.), you need to add forwarding rules **before** or **after** enabling Email Routing:
+If your domain already has email (Gmail, QQ Mail, Outlook, etc.), enabling Email Routing will replace the existing MX records. **Your existing email will stop working** unless you add forwarding rules.
 
-Dashboard → **Email** → **Email Routing** → **Routing Rules** → **Create Address**
+**Fix:** Add custom address rules for each address you use. These have higher priority than the catch-all, so your real emails get forwarded normally.
+
+Dashboard → **Email** → **Email Routing** → **Routing Rules** → **Create Address**:
 
 | Custom Address | Action | Destination |
 |----------------|--------|-------------|
-| `admin@yourdomain.com` | Forward to | `your-real@email.com` |
-| `info@yourdomain.com` | Forward to | `your-real@email.com` |
+| `admin@yourdomain.com` | Forward to | `admin@gmail.com` |
+| `support@yourdomain.com` | Forward to | `support@gmail.com` |
 
-Custom address rules have higher priority than catch-all, so your existing addresses will be forwarded normally while all other addresses go to the Worker.
-
-You can also add forwarding rules via the setup tool:
+Or via code:
 
 ```python
 from cf_mail.setup import add_forwarding_rule
 
 add_forwarding_rule(
-    api_token="your-cf-token",
+    api_token="your-cf-api-token",
     zone_id="your-zone-id",
     source_email="admin@yourdomain.com",
-    destination_email="your-real@email.com",
+    destination_email="admin@gmail.com",
 )
 ```
 
 ## API Reference
 
-### `CloudflareMail(domain, api_url, auth_key, **kwargs)`
+### `CloudflareMail(domain, api_url, auth_key, **options)`
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `domain` | str | required | Email domain |
-| `api_url` | str | required | Worker URL |
-| `auth_key` | str | required | Auth key |
-| `proxy` | str | `""` | HTTP proxy |
-| `prefix_length` | tuple | `(8, 13)` | Random prefix length range |
-| `verify_ssl` | bool | `False` | Verify SSL certificates |
-| `request_timeout` | int | `10` | API request timeout (seconds) |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `proxy` | `str` | `""` | HTTP proxy, e.g. `http://127.0.0.1:7890` |
+| `prefix_length` | `tuple` | `(8, 13)` | Random prefix length range |
+| `request_timeout` | `int` | `10` | API timeout in seconds |
 
 ### Methods
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `create_email(prefix=None)` | `(email, token)` | Generate random email |
-| `get_code(token)` | `EmailResult` | Query verification code (single request) |
-| `wait_for_code(token, timeout=120)` | `str \| None` | Poll for verification code |
-| `get_link(token)` | `EmailResult` | Query verification link (single request) |
-| `wait_for_link(token, timeout=120)` | `str \| None` | Poll for verification link |
+| `create_email(prefix?)` | `(email, token)` | Generate email address (local, no API call) |
+| `wait_for_code(token, timeout?)` | `str` or `None` | Wait for verification code |
+| `wait_for_link(token, timeout?)` | `str` or `None` | Wait for verification link |
+| `wait_for_email(token, timeout?)` | `EmailResult` | Wait for any email |
+| `get_code(token)` | `EmailResult` | Single query for code |
+| `get_link(token)` | `EmailResult` | Single query for link |
 | `get_raw(token)` | `EmailResult` | Get raw email content |
-| `wait_for_email(token, timeout=120)` | `EmailResult` | Wait for any email |
-| `health_check()` | `dict` | Check Worker health |
+| `health_check()` | `dict` | Check if Worker is running |
 
-### Worker API Endpoints
+### Worker Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /code?email=<prefix>` | Query verification code |
-| `GET /link?email=<prefix>` | Query verification link |
-| `GET /raw?email=<prefix>` | Get raw email content |
-| `GET /health` | Health check |
+All require `X-Auth-Key` header or `?key=` query param.
 
-All endpoints require `X-Auth-Key` header or `?key=` parameter.
+| Endpoint | Response |
+|----------|----------|
+| `GET /code?email=prefix` | `{"found": true, "code": "123456", ...}` |
+| `GET /link?email=prefix` | `{"found": true, "link": "https://...", ...}` |
+| `GET /raw?email=prefix` | `{"found": true, "subject": "...", "bodyPreview": "...", ...}` |
+| `GET /health` | `{"ok": true, "domain": "...", ...}` |
 
-## Free Tier Limits
+## Limits (Free Tier)
 
-| Resource | Free Limit | Approx. Capacity |
-|----------|------------|-------------------|
-| Workers Requests | 100,000/day | — |
-| KV Writes | 1,000/day | ~300 registrations/day |
-| KV Reads | 100,000/day | — |
+| Resource | Daily Free Limit | Notes |
+|----------|-----------------|-------|
+| Workers Requests | 100,000 | Polling + email events |
+| KV Reads | 100,000 | Code/link queries |
+| KV Writes | 1,000 | ~300 registrations/day |
+| Email Routing | Unlimited | No cap on incoming emails |
 
-For higher volume, upgrade to Workers Paid ($5/month) for unlimited KV operations.
+Need more? Workers Paid plan ($5/month) removes KV limits.
 
 ## License
 
